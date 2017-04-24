@@ -9,14 +9,18 @@ import java.util.regex.Pattern;
  * Server class that starts the host server and the client side prompt
  */
 public class Server {
+//	private static final String DIRECTORY_PREFIX =
+//			"C:/Users/Nick/Documents/GitHub/CloudComputing/P2/";
 	private static final String DIRECTORY_PREFIX =
-			"C:/Users/Nick/Documents/GitHub/CloudComputing/P2/";
+			"C:/Users/User/Documents/GitHub/CloudComputing/P2/";
 	
 	private Host host;
 	private ArrayList<Host> connectedHosts;
 	private ArrayList<Tuple> tuples;
 	// tupleLock to prevent race conditions
 	private Object tupleLock = new Object();
+	// hostLock to prevent race conditions
+	private Object hostLock = new Object();
 
 	String filePath;
 
@@ -30,8 +34,8 @@ public class Server {
 
 		// upon creation, create the directories and clear the host and tuple files
 		filePath = createDirectories();
-		//writeHosts();
-		//writeTuples();
+		writeHosts();
+		writeTuples();
 		startServer();
 	}
 
@@ -44,87 +48,68 @@ public class Server {
 	}
 
 	/*
-	 * evaluates the add host command
-	 */
-	private String addHostCommand(String command) {
-		String[] hosts = LindaInputParser.getHosts(command);
-		boolean addedHost = false;
-
-		if (hosts.length == 0) {
-			return "-linda: invalid command arguments";
-		}
-
-		String result = "";
-
-		for (int i = 0; i < hosts.length; i++) {
-			Host h = Host.readHost(hosts[i]);
-
-			if (connectedHosts.contains(h)) {
-				result = "host: " + h.getName() + " already exists";
-			}
-			else {
-				connectedHosts.add(h);
-				addedHost = true;
-			}
-		}
-
-		if (addedHost) {
-			addHosts();
-		}
-		return result;
-	}
-
-	/*
-	 * delete the specified hosts
-	 */
-	private String deleteHostCommand(String command) {
-		String[] hostNames = LindaInputParser.getHostNames(command);
-	
-		if (hostNames.length == 0) {
-			return "-linda: invalid command arguments";
-		}
-
-		String result = "removed hosts: ";
-		
-		for (int i = 0; i < hostNames.length; i++) {
-			Host h = new Host(hostNames[i]);
-			
-			if (!connectedHosts.contains(h)) {
-				result = "-linda: error: host " + h.getName() +
-					" doesn't exist, no hosts have been deleted";
-				return result;
-			}
-		}
-		
-		for (int i = 0; i < hostNames.length; i++) {
-			Host h = new Host(hostNames[i]);
-
-			if (connectedHosts.contains(h)) {
-				connectedHosts.remove(h);
-				result += (h.getName() + ", ");
-			}
-		}
-
-		deleteHosts();
-		return result.substring(0, result.length() - 2);
-	}
-
-	/*
 	 * add hosts method that communicated with the other hosts to be added
 	 */
-	private void addHosts() {
-		writeHosts();
-		broadcastObject(buildConnectedHostStrings());
+	private void addHosts(Host[] hosts) {
+		synchronized (hostLock) {
+			boolean addedHost = false;
+			
+			for (int i = 0; i < hosts.length; i++) {
+				if (!hosts[i].equals(host)) {
+					addedHost = true;
+					connectedHosts.add(hosts[i]);
+				}
+			}
+			
+			if (addedHost) {
+				writeHosts();
+				broadcastObject(buildConnectedHostStrings());
+			}
+		}
 	}
 
 	/*
 	 * delete the hosts and redistribute the tuples
 	 */
-	private void deleteHosts() {
-		writeHosts();
-		broadcastObject(buildConnectedHostStrings());
+	private void deleteHosts(Host[] hosts) {
+		synchronized (hostLock) {
+			boolean removedHost = false;
+			boolean removeSelf = false;
+			
+			for (int i = 0; i < hosts.length; i++) {
+				if (connectedHosts.remove(hosts[i])) {
+					removedHost = true;
+				}
+				if (hosts[i].equals(host)) {
+					removeSelf = true;
+				}
+			}
+			
+			if (removedHost) {
+				broadcastObject(buildConnectedHostStrings());
+			}
+			
+			if (removeSelf) {
+				connectedHosts.clear();
+			}
+			writeHosts();
+		}
 	}
 
+//	/*
+//	 * put tuple in the tuple store
+//	 */
+//	private void putTuple(Tuple tuple) {
+//		
+//	}
+//	
+//	/*
+//	 * delete tuple in the tuple store
+//	 */
+//	private void deleteTuple(Tuple tuple, boolean removeTuple) {
+//		
+//	}
+	
 	/*
 	 * broadcast the object to the connected hosts
 	 */
@@ -147,8 +132,11 @@ public class Server {
 				Socket socket = new Socket(connectedHostAddress, connectedHostPort);
 
 				ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+				ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
+				
 				out.writeObject(o);
-				out.flush();
+				in.close();
+				out.close();
 				socket.close();
 
 			} catch (Exception e) {
@@ -329,16 +317,16 @@ public class Server {
 		private static final String N_ACK = "nack";
 		private static final String ACK = "ack";
 		
-		ObjectOutputStream clientOut;
-		ObjectInputStream clientIn;
 		Socket clientSocket;
+		ObjectInputStream clientIn;
+		ObjectOutputStream clientOut;
 
 		ClientRequestHandler(Socket clientSocket) {
 			try {
 				this.clientSocket = clientSocket;
-				clientOut = new ObjectOutputStream(clientSocket.getOutputStream());
 				clientIn = new ObjectInputStream(clientSocket.getInputStream());
-			
+				clientOut = new ObjectOutputStream(clientSocket.getOutputStream());
+				
 			} catch (IOException e) {
 				e.printStackTrace();
 			}
@@ -354,7 +342,7 @@ public class Server {
 					inputHandler(input);
 				}
 				else if (object instanceof ArrayList) {
-					ArrayList<String> hosts = (ArrayList<String>)object;
+					ArrayList<String> hosts = (ArrayList<String>) object;
 					updateHosts(hosts);
 				}
 
@@ -364,8 +352,8 @@ public class Server {
 				e.printStackTrace();
 			} finally {
 				try {
-					clientOut.close();
 					clientIn.close();
+					clientOut.close();
 					clientSocket.close();
 				}
 				catch (IOException e) {
@@ -375,12 +363,11 @@ public class Server {
 		}
 
 		private void inputHandler(String input) {
-			String message = "";
 			Matcher matcher = Pattern.compile(
 					"(\\w+)").matcher(input);
 
 			if (!matcher.find()) {
-				message = "-linda: invalid command";
+				String message = "-linda: invalid command";
 				try {
 					clientOut.writeObject(message);
 				} catch (Exception e) {
@@ -399,12 +386,10 @@ public class Server {
 						}
 						break;
 					case "add":
-						message = addHostCommand(input);
-						clientOut.writeObject(message);
+						clientOut.writeObject(addHostCommand(input));
 						break;
 					case "delete":
-						message = deleteHostCommand(input);
-						clientOut.writeObject(message);
+						clientOut.writeObject(deleteHostCommand(input));
 						break;
 					case "remove_tuple":
 						getTuple(input, true);
@@ -425,7 +410,7 @@ public class Server {
 						rdCommand(input);
 						break;
 					default:
-						message = "-linda: invalid command";
+						String message = "-linda: invalid command";
 						clientOut.writeObject(message);
 						break;
 				}
@@ -435,6 +420,40 @@ public class Server {
 
 		}
 
+		private String addHostCommand(String command) {
+			String[] hosts = LindaInputParser.getHosts(command);
+
+			if (hosts.length == 0) {
+				return "-linda: invalid command arguments";
+			}
+
+			Host[] hostsToAdd = new Host[hosts.length];
+
+			for (int i = 0; i < hosts.length; i++) {
+				hostsToAdd[i] = Host.readHost(hosts[i]);
+			}
+			
+			addHosts(hostsToAdd);
+			return "";
+		}
+		
+		private String deleteHostCommand(String command) {
+			String[] hosts = LindaInputParser.getHosts(command);
+
+			if (hosts.length == 0) {
+				return "-linda: invalid command arguments";
+			}
+
+			Host[] hostsToDelete = new Host[hosts.length];
+
+			for (int i = 0; i < hosts.length; i++) {
+				hostsToDelete[i] = new Host(hosts[i]);
+			}
+			
+			deleteHosts(hostsToDelete);
+			return "";
+		}
+		
 		private void inCommand(String command) {
 			getTuple(command, true);
 		}

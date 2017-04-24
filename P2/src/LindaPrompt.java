@@ -29,6 +29,8 @@ public class LindaPrompt implements Runnable {
 				response = (String) o;
 			}
 
+			in.close();
+			out.close();
 			clientSocket.close();
 
 		} catch (Exception e) {
