@@ -111,6 +111,21 @@ public class Server {
 //	}
 	
 	/*
+	 * contains tuple module for servers to communicate between each other
+	 */
+	private Tuple containsTuple(Tuple tuple) {
+		synchronized(tupleLock) {
+			int index = tuples.indexOf(tuple);
+			
+			if (index >= 0 && index < tuples.size()) {
+				return tuples.get(index);
+			}
+			
+			return null;
+		}
+	}
+	
+	/*
 	 * broadcast the object to the connected hosts
 	 */
 	private void broadcastObject(Object o) {
@@ -276,6 +291,10 @@ public class Server {
 		}	
 	}
 
+	/*
+	 * essentially the main function of the server, waits for connections then
+	 * spawns thread to deal with those connections
+	 */
 	private void startServer() {
 		ServerSocket serverSocket = null;
 		try {
@@ -391,15 +410,6 @@ public class Server {
 					case "delete":
 						clientOut.writeObject(deleteHostCommand(input));
 						break;
-					case "remove_tuple":
-						getTuple(input, true);
-						break;
-					case "get_tuple":
-						getTuple(input, false);
-						break;
-					case "contains_tuple":
-						containsTuple(input);
-						break;
 					case "in":
 						inCommand(input);
 						break;
@@ -408,6 +418,15 @@ public class Server {
 						break;
 					case "rd":
 						rdCommand(input);
+						break;
+					case "remove_tuple":
+						getTupleCommand(input, true);
+						break;
+					case "get_tuple":
+						getTupleCommand(input, false);
+						break;
+					case "contains_tuple":
+						containsTupleCommand(input);
 						break;
 					default:
 						String message = "-linda: invalid command";
@@ -455,11 +474,11 @@ public class Server {
 		}
 		
 		private void inCommand(String command) {
-			getTuple(command, true);
+			getTupleCommand(command, true);
 		}
 
 		private void rdCommand(String command) {
-			getTuple(command, false);
+			getTupleCommand(command, false);
 		}
 
 		/*
@@ -494,9 +513,14 @@ public class Server {
 							if (connectedHost.equals(host)) {
 								continue;
 							}
+							
 							Socket socket = new Socket(connectedHost.getIPAddress(), connectedHost.getPort());
 							ObjectOutputStream oos = new ObjectOutputStream(socket.getOutputStream());
+							ObjectInputStream ois = new ObjectInputStream(socket.getInputStream());
+							
 							oos.writeObject(new String("tuple"));
+							ois.close();
+							oos.close();
 							socket.close();
 						} catch (Exception e) {
 							e.printStackTrace();
@@ -517,6 +541,8 @@ public class Server {
 						message = (String) o;
 					}
 
+					ois.close();
+					oos.close();
 					socket.close();
 				}
 			} catch (Exception e) {
@@ -533,8 +559,10 @@ public class Server {
 		/*
 		 * contains tuple module for servers to communicate between each other
 		 */
-		private void containsTuple(String command) {
+		private void containsTupleCommand(String command) {
 			Tuple tuple = new Tuple(LindaInputParser.parseTupleQuery(command));
+			Tuple containedTuple = containsTuple(tuple);
+			
 			String message = "";
 			int index = -1;
 			synchronized(tupleLock) {
@@ -566,7 +594,7 @@ public class Server {
 		 * gets a tuple from the tuple store, second argument determines whether the tuple
 		 * must be removed or not
 		 */
-		private void getTuple(String command, boolean removeTuple) {
+		private void getTupleCommand(String command, boolean removeTuple) {
 			Tuple tuple = new Tuple(LindaInputParser.parseTupleQuery(command));
 			String message = "";
 
