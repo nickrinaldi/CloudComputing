@@ -9,17 +9,17 @@ import java.util.regex.Pattern;
  * Server class that starts the host server and the client side prompt
  */
 public class Server {
-//	private static final String DIRECTORY_PREFIX =
-//			"C:/Users/Nick/Documents/GitHub/CloudComputing/P2/";
 	private static final String DIRECTORY_PREFIX =
-			"C:/Users/User/Documents/GitHub/CloudComputing/P2/";
+			"C:/Users/Nick/Documents/GitHub/CloudComputing/P2/";
+//	private static final String DIRECTORY_PREFIX =
+//			"C:/Users/User/Documents/GitHub/CloudComputing/P2/";
 	
 	private Host host;
 	private ArrayList<Host> connectedHosts;
 	private ArrayList<Tuple> tuples;
-	// tupleLock to prevent race conditions
+	// tupleLock to prevent race conditions for client handlers
 	private Object tupleLock = new Object();
-	// hostLock to prevent race conditions
+	// hostLock to prevent race conditions for client handlers
 	private Object hostLock = new Object();
 
 	String filePath;
@@ -51,7 +51,7 @@ public class Server {
 	 * add hosts method that communicated with the other hosts to be added
 	 */
 	private void addHosts(Host[] hosts) {
-		synchronized (hostLock) {
+		synchronized (connectedHosts) {
 			boolean addedHost = false;
 			
 			for (int i = 0; i < hosts.length; i++) {
@@ -72,7 +72,7 @@ public class Server {
 	 * delete the hosts and redistribute the tuples
 	 */
 	private void deleteHosts(Host[] hosts) {
-		synchronized (hostLock) {
+		synchronized (connectedHosts) {
 			boolean removedHost = false;
 			boolean removeSelf = false;
 			
@@ -96,25 +96,31 @@ public class Server {
 		}
 	}
 
-//	/*
-//	 * put tuple in the tuple store
-//	 */
-//	private void putTuple(Tuple tuple) {
-//		
-//	}
-//	
-//	/*
-//	 * delete tuple in the tuple store
-//	 */
-//	private void deleteTuple(Tuple tuple, boolean removeTuple) {
-//		
-//	}
+	/*
+	 * put tuple in the tuple store
+	 */
+	private void putTuple(Tuple tuple) {
+		synchronized (tuples) {
+			tuples.add(tuple);
+			writeTuples();
+		}
+	}
+	
+	/*
+	 * delete tuple in the tuple store
+	 */
+	private void deleteTuple(Tuple tuple) {
+		synchronized (tuples) {
+			tuples.remove(tuple);
+			writeTuples();
+		}
+	}
 	
 	/*
 	 * contains tuple module for servers to communicate between each other
 	 */
 	private Tuple containsTuple(Tuple tuple) {
-		synchronized(tupleLock) {
+		synchronized(tuples) {
 			int index = tuples.indexOf(tuple);
 			
 			if (index >= 0 && index < tuples.size()) {
@@ -501,8 +507,7 @@ public class Server {
 
 				if (host.equals(h)) {
 					synchronized(tupleLock) {
-						tuples.add(tuple);
-						writeTuples();
+						putTuple(tuple);
 						tupleLock.notifyAll();
 					}
 					
@@ -563,29 +568,17 @@ public class Server {
 			Tuple tuple = new Tuple(LindaInputParser.parseTupleQuery(command));
 			Tuple containedTuple = containsTuple(tuple);
 			
-			String message = "";
-			int index = -1;
-			synchronized(tupleLock) {
-				for (int i = 0; i < tuples.size(); i++) {
-					Tuple t = tuples.get(i);
-					if (tuple.equals(t)) {
-						index = i;
-						message = "(" + t.toString() + ")";
-					}
+			String message = (containedTuple != null) ? "(" + containedTuple.toString() + ")" : "";
+			try {
+				clientOut.writeObject(message);
+				Object o = clientIn.readObject();
+		
+				if ((o instanceof String) && ((String) o).equals(ACK) && containedTuple != null) {
+					deleteTuple(containedTuple);
 				}
 
-				try {
-					clientOut.writeObject(message);
-					Object o = clientIn.readObject();
-			
-					if ((o instanceof String) && ((String) o).equals(ACK) && index >= 0) {
-						tuples.remove(index);
-						writeTuples();
-					}
-
-				} catch (Exception e) {
-					e.printStackTrace();
-				}
+			} catch (Exception e) {
+				e.printStackTrace();
 			}
 
 		}
@@ -610,15 +603,12 @@ public class Server {
 					if (host.equals(h)) {
 						Tuple result = new Tuple();
 						synchronized(tupleLock) {
-							while (!tuples.contains(tuple)) {
+							while (containsTuple(tuple) == null) {
 								tupleLock.wait();
 							}
-							int index = tuples.indexOf(tuple);
-							result = (index > -1) ? tuples.get(index) : new Tuple();
 
-							if (removeTuple && index > -1) {
-								tuples.remove(index);
-								writeTuples();
+							if (removeTuple) {
+								deleteTuple(tuple);
 							}
 						}
 
@@ -643,6 +633,8 @@ public class Server {
 							message = (String) o;
 						}
 
+						ois.close();
+						oos.close();
 						socket.close();
 					}
 
@@ -661,18 +653,11 @@ public class Server {
 				synchronized(tupleLock) {
 					// test if the tuple is stored locally
 					while (result == null) {
-						for (int i = 0; i < tuples.size(); i++) {
-							if (tuple.equals(tuples.get(i))) {
-								result = tuples.get(i);
-
-								if (removeTuple) {
-									tuples.remove(i);
-									writeTuples();
-								}
-
-								break;
-							}
+						result = containsTuple(tuple);
+						if (removeTuple && result != null) {
+							deleteTuple(result);
 						}
+						
 						if (result == null) {
 							// test if the tuple is stored on a separate host
 							for (int i = 0; i < connectedHosts.size(); i++) {
@@ -693,6 +678,8 @@ public class Server {
 									oos.writeObject(N_ACK);
 								}
 
+								ois.close();
+								oos.close();
 								socket.close();
 
 								if (o instanceof String) {
