@@ -9,10 +9,10 @@ import java.util.regex.Pattern;
  * Server class that starts the host server and the client side prompt
  */
 public class Server {
-	private static final String DIRECTORY_PREFIX =
-			"C:/Users/Nick/Documents/GitHub/CloudComputing/P2/";
 //	private static final String DIRECTORY_PREFIX =
-//			"C:/Users/User/Documents/GitHub/CloudComputing/P2/";
+//			"C:/Users/Nick/Documents/GitHub/CloudComputing/P2/";
+	private static final String DIRECTORY_PREFIX =
+			"C:/Users/User/Documents/GitHub/CloudComputing/P2/";
 	
 	private Host host;
 	private ArrayList<Host> connectedHosts;
@@ -20,7 +20,7 @@ public class Server {
 	// tupleLock to prevent race conditions for client handlers
 	private Object tupleLock = new Object();
 	// hostLock to prevent race conditions for client handlers
-	private Object hostLock = new Object();
+	//private Object hostLock = new Object();
 
 	String filePath;
 
@@ -34,8 +34,8 @@ public class Server {
 
 		// upon creation, create the directories and clear the host and tuple files
 		filePath = createDirectories();
-		writeHosts();
-		writeTuples();
+//		writeHosts();
+//		writeTuples();
 		startServer();
 	}
 
@@ -63,7 +63,7 @@ public class Server {
 			
 			if (addedHost) {
 				writeHosts();
-				broadcastObject(buildConnectedHostStrings());
+				broadcastObject(buildHostStrings(connectedHosts));
 			}
 		}
 	}
@@ -76,8 +76,10 @@ public class Server {
 			boolean removedHost = false;
 			boolean removeSelf = false;
 			
+			ArrayList<Host> hostList = new ArrayList<Host>(connectedHosts);
+			
 			for (int i = 0; i < hosts.length; i++) {
-				if (connectedHosts.remove(hosts[i])) {
+				if (hostList.remove(hosts[i])) {
 					removedHost = true;
 				}
 				if (hosts[i].equals(host)) {
@@ -86,8 +88,10 @@ public class Server {
 			}
 			
 			if (removedHost) {
-				broadcastObject(buildConnectedHostStrings());
+				broadcastObject(buildHostStrings(hostList));
 			}
+			
+			connectedHosts = hostList;
 			
 			if (removeSelf) {
 				connectedHosts.clear();
@@ -166,11 +170,11 @@ public class Server {
 		}
 	}
 
-	private ArrayList<String> buildConnectedHostStrings() {
+	private ArrayList<String> buildHostStrings(ArrayList<Host> hosts) {
 		// create arraylist of strings because arraylist of hosts is not serializable
 		ArrayList<String> hostStrings = new ArrayList<String>();
-		for (int i = 0; i < connectedHosts.size(); i++) {
-			hostStrings.add(connectedHosts.get(i).toString());
+		for (int i = 0; i < hosts.size(); i++) {
+			hostStrings.add(hosts.get(i).toString());
 		}
 
 		return hostStrings;
@@ -180,13 +184,20 @@ public class Server {
 	 * update the host file
 	 */
 	private void updateHosts(ArrayList<String> hosts) {
-		connectedHosts = new ArrayList<Host>();
-
-		for (int i = 0; i < hosts.size(); i++) {
-			connectedHosts.add(Host.readHost(hosts.get(i)));
+		synchronized (connectedHosts) {
+			connectedHosts = new ArrayList<Host>();
+	
+			for (int i = 0; i < hosts.size(); i++) {		
+				connectedHosts.add(Host.readHost(hosts.get(i)));
+			}
+			
+			// if self is not contained in the list
+			if (!connectedHosts.contains(host)) {
+				connectedHosts.clear();
+			}
+	
+			writeHosts();
 		}
-
-		writeHosts();
 	}
 
 
@@ -229,6 +240,20 @@ public class Server {
 			f.setExecutable(false, false);
 			f.setReadable(true, false);
 			f.setWritable(true, false);
+			
+			FileReader fr = new FileReader(netsLoc);
+			BufferedReader br = new BufferedReader(fr);
+			String line;
+			while ((line = br.readLine()) != null) {
+				connectedHosts.add(Host.readHost(line));
+			}
+			if (br != null) {
+				br.close();
+			}
+			if (fr != null) {
+				fr.close();
+			}
+			
 		} catch (Exception e) {
 			e.printStackTrace();
 		}
@@ -309,7 +334,21 @@ public class Server {
 					serverSocket.getInetAddress(), serverSocket.getLocalPort());
 			host.setAddress(serverAddress);
 
-			connectedHosts.add(host);
+			if (connectedHosts.size() == 0) {
+				// initial startup
+				connectedHosts.add(host);
+			}
+			else {
+				// startup after crash, has connected hosts
+				synchronized (connectedHosts) {
+					int index = connectedHosts.indexOf(host);
+					if (index >= 0 && index < connectedHosts.size()) {
+						connectedHosts.get(index).setAddress(serverAddress);
+						writeHosts();
+						broadcastObject(buildHostStrings(connectedHosts));
+					}
+				}
+			}
 
 			// create client prompt thread
 			(new Thread(new LindaPrompt(serverAddress))).start();
@@ -425,6 +464,9 @@ public class Server {
 					case "rd":
 						rdCommand(input);
 						break;
+					case "get_hosts":
+						getHostsCommand();
+						break;
 					case "remove_tuple":
 						getTupleCommand(input, true);
 						break;
@@ -452,18 +494,64 @@ public class Server {
 				return "-linda: invalid command arguments";
 			}
 
-			Host[] hostsToAdd = new Host[hosts.length];
+			ArrayList<Host> hostsToAdd = new ArrayList<Host>();
 
+			// loop through all hosts in the add hosts command
 			for (int i = 0; i < hosts.length; i++) {
-				hostsToAdd[i] = Host.readHost(hosts[i]);
+				Host h = Host.readHost(hosts[i]);
+				
+				Socket socket = null;
+				ObjectOutputStream oos = null;
+				ObjectInputStream ois = null;
+				try {
+					// get the connected hosts of those added hosts
+					socket = new Socket(h.getIPAddress(), h.getPort());
+					oos = new ObjectOutputStream(socket.getOutputStream());
+					ois = new ObjectInputStream(socket.getInputStream());
+					
+					oos.writeObject(new String("get_hosts"));
+					Object o = ois.readObject();
+					
+					if (o instanceof ArrayList) {
+						@SuppressWarnings("unchecked")
+						ArrayList<String> retrievedHosts = (ArrayList<String>) o;
+						for (int j = 0; j < retrievedHosts.size(); j ++) {
+							Host retrievedHost = Host.readHost(retrievedHosts.get(j));
+							synchronized (connectedHosts) {
+								if (!hostsToAdd.contains(retrievedHost) && !connectedHosts.contains(retrievedHost)) {
+									hostsToAdd.add(retrievedHost);
+								}
+							}
+						}
+					}
+					
+				} catch (IOException e) {
+					e.printStackTrace();
+				} catch (ClassNotFoundException e) {
+					e.printStackTrace();
+				} finally {
+					try {
+						if (ois != null) {
+							ois.close();
+						}
+						if (oos != null) {
+							oos.close();
+						}
+						if (socket != null) {
+							socket.close();
+						}
+					} catch (IOException e) {
+						e.printStackTrace();
+					}
+				}
 			}
 			
-			addHosts(hostsToAdd);
+			addHosts(hostsToAdd.toArray(new Host[hostsToAdd.size()]));
 			return "";
 		}
 		
 		private String deleteHostCommand(String command) {
-			String[] hosts = LindaInputParser.getHosts(command);
+			String[] hosts = LindaInputParser.getHostNames(command);
 
 			if (hosts.length == 0) {
 				return "-linda: invalid command arguments";
@@ -477,6 +565,17 @@ public class Server {
 			
 			deleteHosts(hostsToDelete);
 			return "";
+		}
+		
+		private void getHostsCommand() {
+			try {
+				synchronized (connectedHosts) {
+					clientOut.writeObject(buildHostStrings(connectedHosts));
+				}
+			} catch (IOException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
 		}
 		
 		private void inCommand(String command) {
