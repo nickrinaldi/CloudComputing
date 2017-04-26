@@ -1,8 +1,8 @@
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.security.MessageDigest;
-import java.nio.ByteBuffer;
 import java.io.Serializable;
+import java.math.BigInteger;
 
 public class Tuple implements Serializable {
 	private static final String STRING_REGEX = "\".+\"";
@@ -144,12 +144,12 @@ public class Tuple implements Serializable {
 		try {
 			MessageDigest md5 = MessageDigest.getInstance("MD5");
 			byte[] hash = md5.digest(tupleStr.getBytes());
-			int hashedInt = ByteBuffer.wrap(hash).getInt();
-			if (hashedInt < 0) {
-				hashedInt *= -1;
-			}
-
-			return hashedInt;
+			
+			BigInteger hashVal = new BigInteger(1, hash);
+			BigInteger dividend = new BigInteger("2");
+			dividend = dividend.pow(112);
+			
+			return hashVal.divide(dividend).intValue();
 
 		} catch (Exception e) {
 			System.err.println("alg not found");

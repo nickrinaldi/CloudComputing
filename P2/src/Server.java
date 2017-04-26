@@ -21,7 +21,8 @@ public class Server {
 	private Object tupleLock = new Object();
 	// hostLock to prevent race conditions for client handlers
 	//private Object hostLock = new Object();
-
+	private int[] lookupTable;
+	
 	String filePath;
 
 	public Server() {
@@ -31,7 +32,8 @@ public class Server {
 		this.host = new Host(name);
 		this.connectedHosts = new ArrayList<Host>();
 		this.tuples = new ArrayList<Tuple>();
-
+		this.lookupTable = new int[(int) Math.pow(2, 16)];
+		
 		// upon creation, create the directories and clear the host and tuple files
 		filePath = createDirectories();
 //		writeHosts();
@@ -48,9 +50,14 @@ public class Server {
 	}
 
 	/*
-	 * add hosts method that communicated with the other hosts to be added
+	 * add hosts method that communicated with the other hosts to be added, the hosts
+	 * in the parameter are unique and not connected
 	 */
 	private void addHosts(Host[] hosts) {
+		int tableSize = lookupTable.length;
+		int numberCurrentHosts = connectedHosts.size();
+		int numberNewHosts = connectedHosts.size() + hosts.length;
+		
 		synchronized (connectedHosts) {
 			boolean addedHost = false;
 			
@@ -59,6 +66,11 @@ public class Server {
 					addedHost = true;
 					connectedHosts.add(hosts[i]);
 				}
+			}
+			
+			int partition = (tableSize / numberCurrentHosts) / numberNewHosts;
+			for (int i = 0; i < tableSize; i++) {
+				lookupTable[i] = i / partition;
 			}
 			
 			if (addedHost) {
