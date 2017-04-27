@@ -16,36 +16,36 @@ public class ConsistentHashingUnitTest {
 		
 		int[] lookupTable = new int[(int) Math.pow(2, 16)];
 
-		int tableSize = lookupTable.length;
-		int numberCurrentHosts = 1;
-		int numberNewHosts = 2;
-		int partition = (tableSize / numberCurrentHosts) / numberNewHosts;
-		
-		int oldIndex = -1;
-		for (int i = 0; i < lookupTable.length; i++) {
-			oldIndex = i / partition;
-			if (oldIndex >= numberNewHosts) {
-				oldIndex--;
-			}
-			
-			lookupTable[i] = oldIndex;
-		}
-		
-		numberCurrentHosts++;
-		numberNewHosts++;
-		partition = tableSize / (numberCurrentHosts * numberNewHosts);
-		
-		int[] hostBuckets = new int[2];
-		hostBuckets[0] = 1;
-		hostBuckets[1] = 1;
-		
-		int minIndex, maxIndex;
-		oldIndex = -1;
-		for (int i = 0; i < lookupTable.length; i++) {
-			if (lookupTable[i] != oldIndex) {
-				minIndex = i;
-			}
-		}
+//		int tableSize = lookupTable.length;
+//		int numberCurrentHosts = 1;
+//		int numberNewHosts = 2;
+//		int partition = (tableSize / numberCurrentHosts) / numberNewHosts;
+//		
+//		int oldIndex = -1;
+//		for (int i = 0; i < lookupTable.length; i++) {
+//			oldIndex = i / partition;
+//			if (oldIndex >= numberNewHosts) {
+//				oldIndex--;
+//			}
+//			
+//			lookupTable[i] = oldIndex;
+//		}
+//		
+//		numberCurrentHosts++;
+//		numberNewHosts++;
+//		partition = tableSize / (numberCurrentHosts * numberNewHosts);
+//		
+//		int[] hostBuckets = new int[2];
+//		hostBuckets[0] = 1;
+//		hostBuckets[1] = 1;
+//		
+//		int minIndex, maxIndex;
+//		oldIndex = -1;
+//		for (int i = 0; i < lookupTable.length; i++) {
+//			if (lookupTable[i] != oldIndex) {
+//				minIndex = i;
+//			}
+//		}
 		
 //		int partition = 0;
 //		int i = 0;

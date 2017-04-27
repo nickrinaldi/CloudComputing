@@ -9,10 +9,21 @@ import java.util.regex.Pattern;
  * Server class that starts the host server and the client side prompt
  */
 public class Server {
-//	private static final String DIRECTORY_PREFIX =
-//			"C:/Users/Nick/Documents/GitHub/CloudComputing/P2/";
+	private static final String NOTIFY_HOSTS_COMMAND = "tuple";
+	private static final String PUT_TUPLE_COMMAND = "out";
+	private static final String READ_TUPLE_COMMAND = "rd";
+	private static final String DELETE_TUPLE_COMMAND = "in";
+	private static final String ADD_HOSTS_COMMAND = "add";
+	private static final String DELETE_HOSTS_COMMAND = "delete";
+	private static final String GET_HOSTS_COMMAND = "get_hosts";
+	private static final String REMOVE_TUPLE_COMMAND = "remove_tuple";
+	private static final String GET_TUPLE_COMMAND = "get_tuple";
+	private static final String CONTAINS_TUPLE_COMMAND = "contains_tuple";
+	
 	private static final String DIRECTORY_PREFIX =
-			"C:/Users/User/Documents/GitHub/CloudComputing/P2/";
+			"C:/Users/Nick/Documents/GitHub/CloudComputing/P2/";
+//	private static final String DIRECTORY_PREFIX =
+//			"C:/Users/User/Documents/GitHub/CloudComputing/P2/";
 	
 	private Host host;
 	private ArrayList<Host> connectedHosts;
@@ -49,69 +60,176 @@ public class Server {
 		return host.getAddress();
 	}
 
+	private void startupFromCrash() {
+		// startup after crash, has connected hosts
+		synchronized (connectedHosts) {
+			int index = connectedHosts.indexOf(host);
+			if (index >= 0 && index < connectedHosts.size()) {
+				connectedHosts.get(index).setAddress(host.getAddress());
+				
+				for (int i = 0; i < connectedHosts.size(); i++) {
+					Host connectedHost = connectedHosts.get(i);
+					
+					if (host.equals(connectedHost)) {
+						// don't communicate if connected host is the same host
+						continue;
+					}
+
+					try {
+						int connectedHostPort = connectedHost.getPort();
+						InetAddress connectedHostAddress = connectedHost.getIPAddress();
+
+						Socket socket = new Socket(connectedHostAddress, connectedHostPort);
+
+						ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+						ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
+						
+						out.writeObject(GET_HOSTS_COMMAND);
+						
+						Object o = in.readObject();
+						if (o instanceof ArrayList) {
+							@SuppressWarnings("unchecked")
+							ArrayList<String> hosts = (ArrayList<String>) o;
+							updateHosts(hosts);
+						}
+						
+						out.close();
+						in.close();
+						socket.close();
+
+					} catch (Exception e) {
+						//System.out.println("error connecting to host: " + connectedHost.getName());
+					}
+				}
+				
+				writeHosts();
+				broadcastObject(buildHostStrings(connectedHosts));
+			}
+		}
+	}
+	
 	/*
 	 * add hosts method that communicated with the other hosts to be added, the hosts
-	 * in the parameter are unique and not connected
+	 * in the parameter are unique and not already connected
 	 */
 	private void addHosts(Host[] hosts) {
-		int tableSize = lookupTable.length;
-		int numberCurrentHosts = connectedHosts.size();
-		int numberNewHosts = connectedHosts.size() + hosts.length;
 		
-		synchronized (connectedHosts) {
-			boolean addedHost = false;
-			
-			for (int i = 0; i < hosts.length; i++) {
-				if (!hosts[i].equals(host)) {
-					addedHost = true;
-					connectedHosts.add(hosts[i]);
-				}
+		boolean addedHost = false;
+		for (int i = 0; i < hosts.length; i++) {
+			if (!hosts[i].equals(host)) {
+				addedHost = true;
+				addHost(hosts[i]);
 			}
-			
-			int partition = (tableSize / numberCurrentHosts) / numberNewHosts;
-			for (int i = 0; i < tableSize; i++) {
-				lookupTable[i] = i / partition;
-			}
-			
-			if (addedHost) {
+		}
+		
+		if (addedHost) {
+			synchronized (connectedHosts) {
 				writeHosts();
 				broadcastObject(buildHostStrings(connectedHosts));
 			}
 		}
 	}
 
+	private void addHost(Host addedHost) {
+		synchronized (connectedHosts) {
+			int maxRange = 0;
+			int startIndex = 0;
+			int endIndex = 0;
+			Host splittedHost = null;
+			
+			for (int i = 0; i < connectedHosts.size(); i++) {
+				Host connectedHost = connectedHosts.get(i);
+				if (maxRange < connectedHost.getRange()) {
+					maxRange = connectedHost.getRange();
+					startIndex = connectedHost.getMin() + maxRange / 2;
+					endIndex = connectedHost.getMax();
+					splittedHost = connectedHost;
+				}
+			}
+			
+			connectedHosts.add(addedHost);
+			
+			if (splittedHost == null) {
+				// error
+				return;
+			}
+			
+			addedHost.setMin(startIndex);
+			addedHost.setMax(endIndex);
+			splittedHost.setMax(startIndex - 1);
+			
+			// redistribute the tuples
+			
+		}
+	}
+	
 	/*
 	 * delete the hosts and redistribute the tuples
 	 */
 	private void deleteHosts(Host[] hosts) {
-		synchronized (connectedHosts) {
-			boolean removedHost = false;
-			boolean removeSelf = false;
-			
-			ArrayList<Host> hostList = new ArrayList<Host>(connectedHosts);
-			
-			for (int i = 0; i < hosts.length; i++) {
-				if (hostList.remove(hosts[i])) {
-					removedHost = true;
-				}
-				if (hosts[i].equals(host)) {
-					removeSelf = true;
-				}
+		boolean removeSelf = false;
+		
+		ArrayList<Host> oldConnectedHosts = new ArrayList<Host>(connectedHosts);
+		
+		for (int i = 0; i < hosts.length; i++) {
+			if (hosts[i].equals(host)) {
+				removeSelf = true;
 			}
 			
-			if (removedHost) {
-				broadcastObject(buildHostStrings(hostList));
-			}
-			
-			connectedHosts = hostList;
-			
-			if (removeSelf) {
-				connectedHosts.clear();
-			}
-			writeHosts();
+			deleteHost(hosts[i]);
 		}
+		
+		synchronized (connectedHosts) {
+			ArrayList<Host> newConnectedHosts = connectedHosts;
+			connectedHosts = oldConnectedHosts;
+			broadcastObject(buildHostStrings(newConnectedHosts));
+			connectedHosts = newConnectedHosts;
+		}
+		
+		if (removeSelf) {
+			connectedHosts.clear();
+			host.setMin(0);
+			host.setMax((int) Math.pow(2, 16) - 1);
+			connectedHosts.add(host);
+		}
+		writeHosts();
 	}
 
+	private void deleteHost(Host deletedHost) {
+		synchronized (connectedHosts) {
+			
+			Host hostToInheritTuples = null;
+			Host hostToDelete = null;
+			
+			for (int i = 0; i < connectedHosts.size(); i++) {
+				Host connectedHost = connectedHosts.get(i);
+				if (connectedHost.equals(deletedHost)) {
+					hostToDelete = connectedHost;
+					break;
+				}
+			}
+			
+			if (hostToDelete == null) {
+				return;
+			}
+			
+			for (int i = 0; i < connectedHosts.size(); i++) {
+				hostToInheritTuples = connectedHosts.get(i);
+				
+				if (hostToInheritTuples.getMax() == hostToDelete.getMin() - 1) {
+					break;
+				}
+			}
+			
+			connectedHosts.remove(hostToDelete);
+			if (hostToInheritTuples == null) {
+				return;
+			}
+			
+			hostToInheritTuples.setMax(hostToDelete.getMax());
+		}
+	}
+	
 	/*
 	 * put tuple in the tuple store
 	 */
@@ -199,13 +317,22 @@ public class Server {
 		synchronized (connectedHosts) {
 			connectedHosts = new ArrayList<Host>();
 	
-			for (int i = 0; i < hosts.size(); i++) {		
-				connectedHosts.add(Host.readHost(hosts.get(i)));
+			for (int i = 0; i < hosts.size(); i++) {
+				Host connectedHost = Host.readHostWithRange(hosts.get(i));
+				
+				// must change self address in case the incoming host list is from another host
+				if (connectedHost.equals(host)) {
+					connectedHost.setAddress(host.getAddress());
+				}
+				connectedHosts.add(connectedHost);
 			}
 			
 			// if self is not contained in the list
 			if (!connectedHosts.contains(host)) {
 				connectedHosts.clear();
+				host.setMin(0);
+				host.setMax((int) Math.pow(2, 16) - 1);
+				connectedHosts.add(host);
 			}
 	
 			writeHosts();
@@ -257,7 +384,7 @@ public class Server {
 			BufferedReader br = new BufferedReader(fr);
 			String line;
 			while ((line = br.readLine()) != null) {
-				connectedHosts.add(Host.readHost(line));
+				connectedHosts.add(Host.readHostWithRange(line));
 			}
 			if (br != null) {
 				br.close();
@@ -351,15 +478,7 @@ public class Server {
 				connectedHosts.add(host);
 			}
 			else {
-				// startup after crash, has connected hosts
-				synchronized (connectedHosts) {
-					int index = connectedHosts.indexOf(host);
-					if (index >= 0 && index < connectedHosts.size()) {
-						connectedHosts.get(index).setAddress(serverAddress);
-						writeHosts();
-						broadcastObject(buildHostStrings(connectedHosts));
-					}
-				}
+				startupFromCrash();
 			}
 
 			// create client prompt thread
@@ -528,7 +647,7 @@ public class Server {
 						@SuppressWarnings("unchecked")
 						ArrayList<String> retrievedHosts = (ArrayList<String>) o;
 						for (int j = 0; j < retrievedHosts.size(); j ++) {
-							Host retrievedHost = Host.readHost(retrievedHosts.get(j));
+							Host retrievedHost = Host.readHostWithRange(retrievedHosts.get(j));
 							synchronized (connectedHosts) {
 								if (!hostsToAdd.contains(retrievedHost) && !connectedHosts.contains(retrievedHost)) {
 									hostsToAdd.add(retrievedHost);
@@ -676,22 +795,23 @@ public class Server {
 		 * contains tuple module for servers to communicate between each other
 		 */
 		private void containsTupleCommand(String command) {
-			Tuple tuple = new Tuple(LindaInputParser.parseTupleQuery(command));
-			Tuple containedTuple = containsTuple(tuple);
+			synchronized (tupleLock) {
+				Tuple tuple = new Tuple(LindaInputParser.parseTupleQuery(command));
+				Tuple containedTuple = containsTuple(tuple);
+				
+				String message = (containedTuple != null) ? "(" + containedTuple.toString() + ")" : "";
+				try {
+					clientOut.writeObject(message);
+					Object o = clientIn.readObject();
 			
-			String message = (containedTuple != null) ? "(" + containedTuple.toString() + ")" : "";
-			try {
-				clientOut.writeObject(message);
-				Object o = clientIn.readObject();
-		
-				if ((o instanceof String) && ((String) o).equals(ACK) && containedTuple != null) {
-					deleteTuple(containedTuple);
+					if ((o instanceof String) && ((String) o).equals(ACK) && containedTuple != null) {
+						deleteTuple(containedTuple);
+					}
+	
+				} catch (Exception e) {
+					e.printStackTrace();
 				}
-
-			} catch (Exception e) {
-				e.printStackTrace();
 			}
-
 		}
 		
 		/*
