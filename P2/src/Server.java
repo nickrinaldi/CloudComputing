@@ -23,6 +23,7 @@ public class Server {
 	private static final String CONTAINS_TUPLE = "contains_tuple";
 	private static final String BACKUP_TUPLES = "backup_tuples";
 	private static final String GET_BACKUP_TUPLES = "get_backup_tuples";
+	private static final String STORE_ON_BACKUP = "store_on_backup";
 	
 //	private static final String DIRECTORY_PREFIX =
 //			"C:/Users/Nick/Documents/GitHub/CloudComputing/P2/";
@@ -273,16 +274,21 @@ public class Server {
 		}
 	}
 	
-	/*
-	 * tells the backup host to backup our tuples
-	 */
-	private void backupTuples() {
+	private Host getBackupHost(Host h) {
 		ArrayList<Host> hosts = new ArrayList<Host>(connectedHosts);
 		Collections.sort(hosts, new HostRangeComparator());
 		
 		int half = hosts.size() / 2;
-		int current = hosts.indexOf(host);
+		int current = hosts.indexOf(h);
 		Host backup = hosts.get((current + half) % hosts.size());
+		return backup;
+	}
+	
+	/*
+	 * tells the backup host to backup our tuples
+	 */
+	private void backupTuples() {
+		Host backup = getBackupHost(host);
 		
 		ArrayList<String> tupleStrings = new ArrayList<String>();
 		for (Tuple tuple : tuples) {
@@ -329,6 +335,13 @@ public class Server {
 			tuples.remove(tuple);
 			writeTuples();
 			backupTuples();
+		}
+	}
+	
+	private void storeOnBackup(Tuple tuple) {
+		synchronized (backupTuples) {
+			backupTuples.add(tuple);
+			writeTuples();
 		}
 	}
 	
@@ -748,6 +761,9 @@ public class Server {
 					case GET_BACKUP_TUPLES:
 						getBackupTuples();
 						break;
+					case STORE_ON_BACKUP:
+						storeOnBackup(new Tuple(LindaInputParser.parseTuple(input)));
+						break;
 					default:
 						String message = "-linda: invalid command";
 						clientOut.writeObject(message);
@@ -906,9 +922,11 @@ public class Server {
 		
 			int hash = tuple.hashCode();
 			Host h = null;
+			Host backup = null;
 			for (Host connectedHost : connectedHosts) {
 				if (hash >= connectedHost.getMin() && hash <= connectedHost.getMax()) {
 					h = connectedHost;
+					backup = getBackupHost(h);
 					break;
 				}
 			}
@@ -955,20 +973,39 @@ public class Server {
 				}
 
 				else {
-					Socket socket = new Socket(address, port);
-					ObjectOutputStream oos = new ObjectOutputStream(socket.getOutputStream());
-					ObjectInputStream ois = new ObjectInputStream(socket.getInputStream());
-
-					oos.writeObject(command);
-					Object o = ois.readObject();
-
-					if (o instanceof String) {
-						message = (String) o;
+					try {
+						Socket socket = new Socket(address, port);
+						ObjectOutputStream oos = new ObjectOutputStream(socket.getOutputStream());
+						ObjectInputStream ois = new ObjectInputStream(socket.getInputStream());
+	
+						oos.writeObject(command);
+						Object o = ois.readObject();
+	
+						if (o instanceof String) {
+							message = (String) o;
+						}
+	
+						ois.close();
+						oos.close();
+						socket.close();
+						
+					} catch (IOException e) {
+						// can't communicate with host, store the tuple on the backup
+						try {
+							Socket socket = new Socket(backup.getIPAddress(), backup.getPort());
+							ObjectOutputStream oos = new ObjectOutputStream(socket.getOutputStream());
+							ObjectInputStream ois = new ObjectInputStream(socket.getInputStream());
+		
+							oos.writeObject(STORE_ON_BACKUP + "(" + tuple.toString() + ")");
+		
+							ois.close();
+							oos.close();
+							socket.close();
+							
+						} catch (IOException err) {
+							System.out.println("error communicating with the backup host");
+						}
 					}
-
-					ois.close();
-					oos.close();
-					socket.close();
 				}
 			} catch (Exception e) {
 				e.printStackTrace();
