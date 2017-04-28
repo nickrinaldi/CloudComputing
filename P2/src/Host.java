@@ -1,4 +1,5 @@
 import java.net.*;
+import java.util.Comparator;
 
 /*
  * Host class representing a name plus ip address and port
@@ -138,5 +139,11 @@ public class Host {
 		}
 
 		return false;
+	}
+}
+
+class HostRangeComparator implements Comparator<Host> {
+	public int compare(Host host1, Host host2) {
+		return host1.getMin() - host2.getMin();
 	}
 }

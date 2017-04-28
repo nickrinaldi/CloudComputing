@@ -1,6 +1,7 @@
 import java.io.*;
 import java.net.*;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -15,24 +16,27 @@ public class Server {
 	private static final String DELETE_TUPLE_COMMAND = "in";
 	private static final String ADD_HOSTS_COMMAND = "add";
 	private static final String DELETE_HOSTS_COMMAND = "delete";
-	private static final String GET_HOSTS_COMMAND = "get_hosts";
-	private static final String REMOVE_TUPLE_COMMAND = "remove_tuple";
-	private static final String GET_TUPLE_COMMAND = "get_tuple";
-	private static final String CONTAINS_TUPLE_COMMAND = "contains_tuple";
+	private static final String GET_HOSTS = "get_hosts";
+	private static final String REMOVE_TUPLE = "remove_tuple";
+	private static final String GET_TUPLE = "get_tuple";
+	private static final String PUT_TUPLE = "put_tuple";
+	private static final String CONTAINS_TUPLE = "contains_tuple";
+	private static final String BACKUP_TUPLES = "backup_tuples";
+	private static final String GET_BACKUP_TUPLES = "get_backup_tuples";
 	
-	private static final String DIRECTORY_PREFIX =
-			"C:/Users/Nick/Documents/GitHub/CloudComputing/P2/";
 //	private static final String DIRECTORY_PREFIX =
-//			"C:/Users/User/Documents/GitHub/CloudComputing/P2/";
+//			"C:/Users/Nick/Documents/GitHub/CloudComputing/P2/";
+	private static final String DIRECTORY_PREFIX =
+			"C:/Users/User/Documents/GitHub/CloudComputing/P2/";
 	
 	private Host host;
 	private ArrayList<Host> connectedHosts;
 	private ArrayList<Tuple> tuples;
+	private ArrayList<Tuple> backupTuples;
 	// tupleLock to prevent race conditions for client handlers
 	private Object tupleLock = new Object();
 	// hostLock to prevent race conditions for client handlers
 	//private Object hostLock = new Object();
-	private int[] lookupTable;
 	
 	String filePath;
 
@@ -43,7 +47,7 @@ public class Server {
 		this.host = new Host(name);
 		this.connectedHosts = new ArrayList<Host>();
 		this.tuples = new ArrayList<Tuple>();
-		this.lookupTable = new int[(int) Math.pow(2, 16)];
+		this.backupTuples = new ArrayList<Tuple>();
 		
 		// upon creation, create the directories and clear the host and tuple files
 		filePath = createDirectories();
@@ -84,7 +88,7 @@ public class Server {
 						ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
 						ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
 						
-						out.writeObject(GET_HOSTS_COMMAND);
+						out.writeObject(GET_HOSTS);
 						
 						Object o = in.readObject();
 						if (o instanceof ArrayList) {
@@ -96,15 +100,54 @@ public class Server {
 						out.close();
 						in.close();
 						socket.close();
+						break;
 
 					} catch (Exception e) {
-						//System.out.println("error connecting to host: " + connectedHost.getName());
+						System.out.println("error getting connected host information from: " + connectedHost.getName());
 					}
 				}
 				
 				writeHosts();
 				broadcastObject(buildHostStrings(connectedHosts));
 			}
+		}
+		
+		// get tuples
+		synchronized (tuples) {
+			ArrayList<Host> hosts = new ArrayList<Host>(connectedHosts);
+			Collections.sort(hosts, new HostRangeComparator());
+			
+			Host backup = hosts.get(hosts.size() / 2);
+			
+			try {
+				int connectedHostPort = backup.getPort();
+				InetAddress connectedHostAddress = backup.getIPAddress();
+
+				Socket socket = new Socket(connectedHostAddress, connectedHostPort);
+
+				ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+				ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
+				
+				out.writeObject(GET_BACKUP_TUPLES);
+				
+				Object o = in.readObject();
+				if (o instanceof ArrayList) {
+					@SuppressWarnings("unchecked")
+					ArrayList<String> tupleStrings = (ArrayList<String>) o;
+					for (String tupleString : tupleStrings) {
+						tuples.add(new Tuple(LindaInputParser.parseTuple(tupleString)));
+					}
+				}
+				
+				out.close();
+				in.close();
+				socket.close();
+
+			} catch (Exception e) {
+				System.out.println("error getting my tuples which should be backed by host: " + backup.getName());
+			}
+			
+			writeTuples();
 		}
 	}
 	
@@ -126,6 +169,7 @@ public class Server {
 			synchronized (connectedHosts) {
 				writeHosts();
 				broadcastObject(buildHostStrings(connectedHosts));
+				redistributeTuples();
 			}
 		}
 	}
@@ -157,9 +201,6 @@ public class Server {
 			addedHost.setMin(startIndex);
 			addedHost.setMax(endIndex);
 			splittedHost.setMax(startIndex - 1);
-			
-			// redistribute the tuples
-			
 		}
 	}
 	
@@ -184,6 +225,7 @@ public class Server {
 			connectedHosts = oldConnectedHosts;
 			broadcastObject(buildHostStrings(newConnectedHosts));
 			connectedHosts = newConnectedHosts;
+			redistributeTuples();
 		}
 		
 		if (removeSelf) {
@@ -192,6 +234,7 @@ public class Server {
 			host.setMax((int) Math.pow(2, 16) - 1);
 			connectedHosts.add(host);
 		}
+		
 		writeHosts();
 	}
 
@@ -231,12 +274,50 @@ public class Server {
 	}
 	
 	/*
+	 * tells the backup host to backup our tuples
+	 */
+	private void backupTuples() {
+		ArrayList<Host> hosts = new ArrayList<Host>(connectedHosts);
+		Collections.sort(hosts, new HostRangeComparator());
+		
+		int half = hosts.size() / 2;
+		int current = hosts.indexOf(host);
+		Host backup = hosts.get((current + half) % hosts.size());
+		
+		ArrayList<String> tupleStrings = new ArrayList<String>();
+		for (Tuple tuple : tuples) {
+			tupleStrings.add("(" + tuple.toString() + ")");
+		}
+		
+		try {
+			int connectedHostPort = backup.getPort();
+			InetAddress connectedHostAddress = backup.getIPAddress();
+
+			Socket socket = new Socket(connectedHostAddress, connectedHostPort);
+
+			ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+			ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
+			
+			out.writeObject(BACKUP_TUPLES);
+			out.writeObject(tupleStrings);
+			
+			out.close();
+			in.close();
+			socket.close();
+
+		} catch (Exception e) {
+			System.out.println("error giving backups to host " + backup.getName());
+		}
+	}
+	
+	/*
 	 * put tuple in the tuple store
 	 */
 	private void putTuple(Tuple tuple) {
 		synchronized (tuples) {
 			tuples.add(tuple);
 			writeTuples();
+			backupTuples();
 		}
 	}
 	
@@ -247,6 +328,7 @@ public class Server {
 		synchronized (tuples) {
 			tuples.remove(tuple);
 			writeTuples();
+			backupTuples();
 		}
 	}
 	
@@ -295,7 +377,7 @@ public class Server {
 				socket.close();
 
 			} catch (Exception e) {
-				System.out.println("error connecting to host: " + connectedHost.getName());
+				System.out.println("error broadcasting to host: " + connectedHost.getName());
 			}
 		}
 	}
@@ -323,6 +405,8 @@ public class Server {
 				// must change self address in case the incoming host list is from another host
 				if (connectedHost.equals(host)) {
 					connectedHost.setAddress(host.getAddress());
+					host.setMin(connectedHost.getMin());
+					host.setMax(connectedHost.getMax());
 				}
 				connectedHosts.add(connectedHost);
 			}
@@ -336,10 +420,50 @@ public class Server {
 			}
 	
 			writeHosts();
+			redistributeTuples();
 		}
 	}
 
+	/*
+	 * method to recalculate the hashes and distribute tuples accordingly
+	 */
+	private void redistributeTuples() {
+		synchronized (tuples) {
+			Iterator<Tuple> iterator = tuples.iterator();
+			while (iterator.hasNext()) {
+				Tuple tuple = iterator.next();
+				int hash = tuple.hashCode();
+				for (Host connectedHost : connectedHosts) {
+					if (!connectedHost.equals(host) && hash >= connectedHost.getMin() &&
+							hash <= connectedHost.getMax()) {
+						
+						// move the tuple
+						try {
+							int connectedHostPort = connectedHost.getPort();
+							InetAddress connectedHostAddress = connectedHost.getIPAddress();
 
+							Socket socket = new Socket(connectedHostAddress, connectedHostPort);
+
+							ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+							ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
+							
+							out.writeObject(PUT_TUPLE_COMMAND + "(" + tuple.toString() + ")");
+							in.close();
+							out.close();
+							socket.close();
+							
+							iterator.remove();
+
+						} catch (Exception e) {
+							System.out.println("error rehashing tuple to host: " + connectedHost.getName());
+						}
+					}
+				}
+			}
+			writeTuples();
+		}
+	}
+	
 	private String createDirectories() {
 		String result;
 
@@ -444,15 +568,23 @@ public class Server {
 		}
 
 		try {
-				
 			FileWriter tupsWriter = new FileWriter(filePath + "/tuples");
 			BufferedWriter bw = new BufferedWriter(tupsWriter);
 			
+			bw.write("tuples:");
+			bw.newLine();
 			for (int i = 0; i < tuples.size(); i++) {
 				bw.write(tuples.get(i).toString());
 				bw.newLine();
 			}
 
+			bw.write("backup_tuples:");
+			bw.newLine();
+			for (int i = 0; i < backupTuples.size(); i++) {
+				bw.write(backupTuples.get(i).toString());
+				bw.newLine();
+			}
+			
 			bw.close();
 			tupsWriter.close();
 			
@@ -523,7 +655,7 @@ public class Server {
 				clientOut = new ObjectOutputStream(clientSocket.getOutputStream());
 				
 			} catch (IOException e) {
-				e.printStackTrace();
+				System.out.println("error connected the input and output stream");
 			}
 		}
 
@@ -552,7 +684,7 @@ public class Server {
 					clientSocket.close();
 				}
 				catch (IOException e) {
-					e.printStackTrace();
+					System.out.println("error closing the input stream, output stream, and socket");
 				}
 			}
 		}
@@ -566,7 +698,7 @@ public class Server {
 				try {
 					clientOut.writeObject(message);
 				} catch (Exception e) {
-					e.printStackTrace();
+					System.out.println("error writing to the client output stream");
 				}
 
 				return;
@@ -575,37 +707,46 @@ public class Server {
 			// evaluate the command
 			try {
 				switch(matcher.group(1)) {
-					case "tuple":
+					case NOTIFY_HOSTS_COMMAND:
 						synchronized(tupleLock) {
 							tupleLock.notifyAll();
 						}
 						break;
-					case "add":
+					case ADD_HOSTS_COMMAND:
 						clientOut.writeObject(addHostCommand(input));
 						break;
-					case "delete":
+					case DELETE_HOSTS_COMMAND:
 						clientOut.writeObject(deleteHostCommand(input));
 						break;
-					case "in":
+					case DELETE_TUPLE_COMMAND:
 						inCommand(input);
 						break;
-					case "out":
+					case PUT_TUPLE_COMMAND:
 						outCommand(input);
 						break;
-					case "rd":
+					case READ_TUPLE_COMMAND:
 						rdCommand(input);
 						break;
-					case "get_hosts":
+					case GET_HOSTS:
 						getHostsCommand();
 						break;
-					case "remove_tuple":
+					case REMOVE_TUPLE:
 						getTupleCommand(input, true);
 						break;
-					case "get_tuple":
+					case GET_TUPLE:
 						getTupleCommand(input, false);
 						break;
-					case "contains_tuple":
+					case PUT_TUPLE:
+						putTuple(new Tuple(LindaInputParser.parseTuple(input)));
+						break;
+					case CONTAINS_TUPLE:
 						containsTupleCommand(input);
+						break;
+					case BACKUP_TUPLES:
+						backupTuplesCommand();
+						break;
+					case GET_BACKUP_TUPLES:
+						getBackupTuples();
 						break;
 					default:
 						String message = "-linda: invalid command";
@@ -618,6 +759,46 @@ public class Server {
 
 		}
 
+		private void backupTuplesCommand() {
+			synchronized (backupTuples) {
+				try {
+					Object o = clientIn.readObject();
+					
+					if (o instanceof ArrayList) {
+						@SuppressWarnings("unchecked")
+						ArrayList<String> tupleStrings = (ArrayList<String>) o;
+						backupTuples.clear();
+						for (String tupleString : tupleStrings) {
+							Tuple tuple = new Tuple(LindaInputParser.parseTuple(tupleString));
+							backupTuples.add(tuple);
+						}
+					}
+					
+				} catch (Exception e) {
+					System.out.println("error storing the backups");
+				}
+				synchronized (tuples) {
+					writeTuples();
+				}
+			}
+		}
+		
+		private void getBackupTuples() {
+			synchronized (backupTuples) {
+				ArrayList<String> backupTupleStrings = new ArrayList<String>();
+				for (Tuple tuple : backupTuples) {
+					String tupleStr = "(" + tuple.toString() + ")";
+					backupTupleStrings.add(tupleStr);
+				}
+			
+				try {
+					clientOut.writeObject(backupTupleStrings);
+				} catch (IOException e) {
+					System.out.println("error writing the backup tuples to the output stream");
+				}
+			}
+		}
+		
 		private String addHostCommand(String command) {
 			String[] hosts = LindaInputParser.getHosts(command);
 
@@ -704,8 +885,7 @@ public class Server {
 					clientOut.writeObject(buildHostStrings(connectedHosts));
 				}
 			} catch (IOException e) {
-				// TODO Auto-generated catch block
-				e.printStackTrace();
+				System.out.println("error writing hosts to the client output stream");
 			}
 		}
 		
@@ -724,9 +904,19 @@ public class Server {
 			String message = "";
 			Tuple tuple = new Tuple(LindaInputParser.parseTuple(command));
 		
-			// hash it % number of connected hosts
-			int hostIndex = tuple.hashCode() % connectedHosts.size();
-			Host h = connectedHosts.get(hostIndex);
+			int hash = tuple.hashCode();
+			Host h = null;
+			for (Host connectedHost : connectedHosts) {
+				if (hash >= connectedHost.getMin() && hash <= connectedHost.getMax()) {
+					h = connectedHost;
+					break;
+				}
+			}
+			
+			if (h == null) {
+				// error
+				return;
+			}
 
 			try {
 				InetAddress address = h.getIPAddress();
@@ -758,7 +948,7 @@ public class Server {
 							oos.close();
 							socket.close();
 						} catch (Exception e) {
-							e.printStackTrace();
+							System.out.println("error notifying host: " + connectedHosts.get(i).getName() + " of a stored tuple");
 						}
 					}
 
@@ -787,7 +977,7 @@ public class Server {
 			try {
 				clientOut.writeObject(message);
 			} catch (Exception e) {
-				e.printStackTrace();
+				System.out.println("error writing the message to the client output stream");
 			}
 		}
 
@@ -809,7 +999,7 @@ public class Server {
 					}
 	
 				} catch (Exception e) {
-					e.printStackTrace();
+					System.out.println("error checking if tuple is contained");
 				}
 			}
 		}
@@ -824,8 +1014,19 @@ public class Server {
 
 			if (!tuple.containsQuery()) {
 				// we can simply hash it
-				int hostIndex = tuple.hashCode() % connectedHosts.size();
-				Host h = connectedHosts.get(hostIndex);
+				int hash = tuple.hashCode();
+				Host h = null;
+				for (Host connectedHost : connectedHosts) {
+					if (hash >= connectedHost.getMin() && hash <= connectedHost.getMax()) {
+						h = connectedHost;
+						break;
+					}
+				}
+				
+				if (h == null) {
+					// error
+					return;
+				}
 
 				try {
 					InetAddress address = h.getIPAddress();
@@ -834,7 +1035,7 @@ public class Server {
 					if (host.equals(h)) {
 						Tuple result = new Tuple();
 						synchronized(tupleLock) {
-							while (containsTuple(tuple) == null) {
+							while ((result = containsTuple(tuple)) == null) {
 								tupleLock.wait();
 							}
 
