@@ -24,12 +24,14 @@ public class Server {
 	private static final String BACKUP_TUPLES = "backup_tuples";
 	private static final String GET_BACKUP_TUPLES = "get_backup_tuples";
 	private static final String STORE_ON_BACKUP = "store_on_backup";
+	private static final String GET_ON_BACKUP = "get_on_backup";
+	private static final String REMOVE_ON_BACKUP = "remove_on_backup";
 	private static final String HOST_ALIVE = "alive";
 	
-	private static final String DIRECTORY_PREFIX =
-			"C:/Users/Nick/Documents/GitHub/CloudComputing/P2/";
 //	private static final String DIRECTORY_PREFIX =
-//			"C:/Users/User/Documents/GitHub/CloudComputing/P2/";
+//			"C:/Users/Nick/Documents/GitHub/CloudComputing/P2/";
+	private static final String DIRECTORY_PREFIX =
+			"C:/Users/User/Documents/GitHub/CloudComputing/P2/";
 	
 	private Host host;
 	private ArrayList<Host> connectedHosts;
@@ -151,13 +153,14 @@ public class Server {
 			
 			writeTuples();
 		}
+		broadcastObject(NOTIFY_HOSTS_COMMAND);
 	}
 	
 	/*
 	 * add hosts method that communicated with the other hosts to be added, the hosts
 	 * in the parameter are unique and not already connected
 	 */
-	private void addHosts(Host[] hosts) {
+	private boolean addHosts(Host[] hosts) {
 		boolean hostDown = false;
 		for (Host connectedHost : connectedHosts) {
 			if (connectedHost.equals(host)) {
@@ -226,7 +229,7 @@ public class Server {
 			}
 		}
 		else if (hostToAddDown) {
-			
+			return false;
 		}
 		
 		else {
@@ -251,6 +254,7 @@ public class Server {
 				}
 			}
 		}
+		return true;
 	}
 	
 	/*
@@ -313,6 +317,7 @@ public class Server {
 			broadcastObject(buildHostStrings(newConnectedHosts));
 			connectedHosts = newConnectedHosts;
 			if (oldRange != host.getRange()) {
+				System.out.println("redist tuples");
 				redistributeTuples();
 			}
 		}
@@ -348,10 +353,17 @@ public class Server {
 				return;
 			}
 			
+			boolean deleteFirst = false;
+			
 			for (int i = 0; i < connectedHosts.size(); i++) {
 				hostToInheritTuples = connectedHosts.get(i);
-				
+				if (hostToDelete.getMin() == 0 && hostToInheritTuples.getMin() == hostToDelete.getMax() + 1) {
+					hostToInheritTuples.setMin(0);
+					deleteFirst = true;
+					break;
+				}
 				if (hostToInheritTuples.getMax() == hostToDelete.getMin() - 1) {
+					hostToInheritTuples.setMax(hostToDelete.getMax());
 					break;
 				}
 			}
@@ -361,7 +373,14 @@ public class Server {
 				return;
 			}
 			
-			hostToInheritTuples.setMax(hostToDelete.getMax());
+			if (host.equals(hostToInheritTuples)) {
+				host.setMin(hostToInheritTuples.getMin());
+				host.setMax(hostToInheritTuples.getMax());
+			}
+			else if (hostToDelete.equals(host)) {
+				host.setMin(0);
+				host.setMax((int) Math.pow(2, 16) - 1);
+			}
 		}
 	}
 	
@@ -433,6 +452,24 @@ public class Server {
 		synchronized (backupTuples) {
 			backupTuples.add(tuple);
 			writeTuples();
+		}
+	}
+	
+	private String getOnBackup(Tuple tuple, boolean remove) {
+		synchronized (backupTuples) {
+			int index = backupTuples.indexOf(tuple);
+			
+			if (index >= 0 && index < backupTuples.size()) {
+				Tuple retrieved = backupTuples.get(index);
+				if (remove) {
+					backupTuples.remove(index);
+				}
+				writeTuples();
+				return "(" + retrieved.toString() + ")";
+			}
+			else {
+				return "";
+			}
 		}
 	}
 	
@@ -518,6 +555,7 @@ public class Server {
 			
 			// if self is not contained in the list
 			if (!connectedHosts.contains(host)) {
+				redistributeTuples();
 				connectedHosts.clear();
 				host.setMin(0);
 				host.setMax((int) Math.pow(2, 16) - 1);
@@ -867,11 +905,19 @@ public class Server {
 					case STORE_ON_BACKUP:
 						storeOnBackup(new Tuple(LindaInputParser.parseTuple(input)));
 						break;
+					case GET_ON_BACKUP:
+						String message = getOnBackup(new Tuple(LindaInputParser.parseTuple(input)), false);
+						clientOut.writeObject(message);
+						break;
+					case REMOVE_ON_BACKUP:
+						message = getOnBackup(new Tuple(LindaInputParser.parseTuple(input)), true);
+						clientOut.writeObject(message);
+						break;
 					case HOST_ALIVE:
 						clientOut.writeObject(HOST_ALIVE);
 						break;
 					default:
-						String message = "-linda: invalid command";
+						message = "-linda: invalid command";
 						clientOut.writeObject(message);
 						break;
 				}
@@ -981,8 +1027,12 @@ public class Server {
 				}
 			}
 			
-			addHosts(hostsToAdd.toArray(new Host[hostsToAdd.size()]));
-			return "";
+			if (addHosts(hostsToAdd.toArray(new Host[hostsToAdd.size()]))) {
+				return "";
+			}
+			else {
+				return "error: host to add is down";
+			}
 		}
 		
 		private String deleteHostCommand(String command) {
@@ -1217,68 +1267,104 @@ public class Server {
 					clientOut.writeObject(message);
 					return;
 				} catch (Exception e) {
-					e.printStackTrace();
+					try {
+						h = getBackupHost(h);
+						InetAddress address = h.getIPAddress();
+						int port = h.getPort();
+						
+						Socket socket = new Socket(address, port);
+						ObjectOutputStream oos = new ObjectOutputStream(socket.getOutputStream());
+						ObjectInputStream ois = new ObjectInputStream(socket.getInputStream());
+						
+						if (removeTuple) {
+							oos.writeObject(REMOVE_ON_BACKUP + "(" + tuple.toString() + ")");
+						}
+						else {
+							oos.writeObject(GET_ON_BACKUP + "(" + tuple.toString() + ")");
+						}
+						
+						Object o = ois.readObject();
+
+						if (o instanceof String) {
+							message = (String) o;
+						}
+
+						ois.close();
+						oos.close();
+						socket.close();
+						
+					} catch (Exception err) {
+						
+					}
 				}
+				try {
+					clientOut.writeObject(message);
+				} catch (IOException e) {
+				}
+				return;
 			}
 			else {
 				// the tuple has a variable in it
 				Tuple result = null;
 				InetAddress ipAddr = host.getIPAddress();
-
-				try {
+				boolean hostDown = false;
 				synchronized(tupleLock) {
 					// test if the tuple is stored locally
 					while (result == null) {
-						result = containsTuple(tuple);
-						if (removeTuple && result != null) {
-							deleteTuple(result);
-						}
-						
-						if (result == null) {
-							// test if the tuple is stored on a separate host
-							for (int i = 0; i < connectedHosts.size(); i++) {
-								Host h = connectedHosts.get(i);
-								if (host.equals(h)) {
-									continue;
-								}
-								Socket socket = new Socket(h.getIPAddress(), h.getPort());
-								ObjectOutputStream oos = new ObjectOutputStream(socket.getOutputStream());
-								ObjectInputStream ois = new ObjectInputStream(socket.getInputStream());
-								oos.writeObject("contains_tuple(" + tuple.toString() + ")");
-								
-								Object o = ois.readObject();
-								if (removeTuple) {
-									oos.writeObject(ACK);
-								}
-								else {
-									oos.writeObject(N_ACK);
-								}
-
-								ois.close();
-								oos.close();
-								socket.close();
-
-								if (o instanceof String) {
-									message = (String) o;
-								
-									if (message.length() > 0) {
-										ipAddr = h.getIPAddress();
-										result = new Tuple(LindaInputParser.parseTuple(message));
-										break;
+						try {
+							result = containsTuple(tuple);
+							if (removeTuple && result != null) {
+								deleteTuple(result);
+							}
+							
+							if (result == null) {
+								// test if the tuple is stored on a separate host
+								for (int i = 0; i < connectedHosts.size(); i++) {
+									Host h = connectedHosts.get(i);
+									if (host.equals(h)) {
+										continue;
+									}
+									Socket socket = new Socket(h.getIPAddress(), h.getPort());
+									ObjectOutputStream oos = new ObjectOutputStream(socket.getOutputStream());
+									ObjectInputStream ois = new ObjectInputStream(socket.getInputStream());
+									oos.writeObject("contains_tuple(" + tuple.toString() + ")");
+									
+									Object o = ois.readObject();
+									if (removeTuple) {
+										oos.writeObject(ACK);
+									}
+									else {
+										oos.writeObject(N_ACK);
+									}
+	
+									ois.close();
+									oos.close();
+									socket.close();
+	
+									if (o instanceof String) {
+										message = (String) o;
+									
+										if (message.length() > 0) {
+											ipAddr = h.getIPAddress();
+											result = new Tuple(LindaInputParser.parseTuple(message));
+											break;
+										}
 									}
 								}
 							}
+						} catch (Exception e) {
+							hostDown = true;
 						}
 						if (result == null) {
 							// tuple doesn't exist, block
-							tupleLock.wait();
+							try {
+								tupleLock.wait();
+							} catch (InterruptedException e) {
+							}
 						}
 					}
 				}
-				} catch (Exception e) {
-					e.printStackTrace();
-				}
-
+				
 				message = "get tuple (" + result.toString() + ") on " + ipAddr.getHostAddress();
 				try {
 					clientOut.writeObject(message);
