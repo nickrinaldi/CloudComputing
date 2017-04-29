@@ -1,9 +1,6 @@
 
 public class ConsistentHashingUnitTest {
 	
-	private static final Long LARGE_PRIME =  948701839L;
-    private static final Long LARGE_PRIME2 = 6920451961L;
-	
 	public static void main(String[] args) {
 		
 		String[] strArr1 = new String[3];

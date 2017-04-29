@@ -24,11 +24,12 @@ public class Server {
 	private static final String BACKUP_TUPLES = "backup_tuples";
 	private static final String GET_BACKUP_TUPLES = "get_backup_tuples";
 	private static final String STORE_ON_BACKUP = "store_on_backup";
+	private static final String HOST_ALIVE = "alive";
 	
-//	private static final String DIRECTORY_PREFIX =
-//			"C:/Users/Nick/Documents/GitHub/CloudComputing/P2/";
 	private static final String DIRECTORY_PREFIX =
-			"C:/Users/User/Documents/GitHub/CloudComputing/P2/";
+			"C:/Users/Nick/Documents/GitHub/CloudComputing/P2/";
+//	private static final String DIRECTORY_PREFIX =
+//			"C:/Users/User/Documents/GitHub/CloudComputing/P2/";
 	
 	private Host host;
 	private ArrayList<Host> connectedHosts;
@@ -37,7 +38,8 @@ public class Server {
 	// tupleLock to prevent race conditions for client handlers
 	private Object tupleLock = new Object();
 	// hostLock to prevent race conditions for client handlers
-	//private Object hostLock = new Object();
+	// also wakes up the thread attempting to add hosts if its waiting
+	private Object hostLock = new Object();
 	
 	String filePath;
 
@@ -118,7 +120,7 @@ public class Server {
 			ArrayList<Host> hosts = new ArrayList<Host>(connectedHosts);
 			Collections.sort(hosts, new HostRangeComparator());
 			
-			Host backup = hosts.get(hosts.size() / 2);
+			Host backup = getBackupHost(host);
 			
 			try {
 				int connectedHostPort = backup.getPort();
@@ -157,8 +159,54 @@ public class Server {
 	 * in the parameter are unique and not already connected
 	 */
 	private void addHosts(Host[] hosts) {
+		synchronized (hostLock) {
+			boolean hostDown = false;
+			while (!hostDown) {
+				for (Host connectedHost : connectedHosts) {
+					try {
+						int connectedHostPort = connectedHost.getPort();
+						InetAddress connectedHostAddress = connectedHost.getIPAddress();
+	
+						Socket socket = new Socket(connectedHostAddress, connectedHostPort);
+						
+						ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+						ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
+						
+						out.writeObject(HOST_ALIVE);
+						Object o = in.readObject();
+						if (o instanceof String) {
+							@SuppressWarnings("unchecked")
+							String response = (String) o;
+						}
+						
+						in.close();
+						out.close();
+						socket.close();
+	
+					} catch (Exception e) {
+						System.out.println("a host is out");
+						hostDown = true;
+						break;
+					}
+				}
+				if (hostDown) {
+					try {
+						hostLock.wait();
+					} catch (InterruptedException e) {
+						System.out.println("thread can't wait on the hostLock");
+					}
+					// set the flag once we wake up
+					hostDown = false;
+				}
+				else {
+					break;
+				}
+			}
+		}
 		
 		boolean addedHost = false;
+		int oldRange = host.getRange();
+		
 		for (int i = 0; i < hosts.length; i++) {
 			if (!hosts[i].equals(host)) {
 				addedHost = true;
@@ -169,8 +217,11 @@ public class Server {
 		if (addedHost) {
 			synchronized (connectedHosts) {
 				writeHosts();
+				if (oldRange != host.getRange()) {
+					redistributeTuples();
+				}
 				broadcastObject(buildHostStrings(connectedHosts));
-				redistributeTuples();
+				backupTuples();
 			}
 		}
 	}
@@ -210,6 +261,7 @@ public class Server {
 	 */
 	private void deleteHosts(Host[] hosts) {
 		boolean removeSelf = false;
+		int oldRange = host.getRange();
 		
 		ArrayList<Host> oldConnectedHosts = new ArrayList<Host>(connectedHosts);
 		
@@ -226,7 +278,9 @@ public class Server {
 			connectedHosts = oldConnectedHosts;
 			broadcastObject(buildHostStrings(newConnectedHosts));
 			connectedHosts = newConnectedHosts;
-			redistributeTuples();
+			if (oldRange != host.getRange()) {
+				redistributeTuples();
+			}
 		}
 		
 		if (removeSelf) {
@@ -234,6 +288,9 @@ public class Server {
 			host.setMin(0);
 			host.setMax((int) Math.pow(2, 16) - 1);
 			connectedHosts.add(host);
+		}
+		else {
+			backupTuples();
 		}
 		
 		writeHosts();
@@ -409,31 +466,40 @@ public class Server {
 	 * update the host file
 	 */
 	private void updateHosts(ArrayList<String> hosts) {
-		synchronized (connectedHosts) {
-			connectedHosts = new ArrayList<Host>();
-	
-			for (int i = 0; i < hosts.size(); i++) {
-				Host connectedHost = Host.readHostWithRange(hosts.get(i));
-				
-				// must change self address in case the incoming host list is from another host
-				if (connectedHost.equals(host)) {
-					connectedHost.setAddress(host.getAddress());
-					host.setMin(connectedHost.getMin());
-					host.setMax(connectedHost.getMax());
+		synchronized (hostLock) {
+			synchronized (connectedHosts) {
+				connectedHosts = new ArrayList<Host>();
+				int oldRange = host.getRange();
+		
+				for (int i = 0; i < hosts.size(); i++) {
+					Host connectedHost = Host.readHostWithRange(hosts.get(i));
+					
+					// must change self address in case the incoming host list is from another host
+					if (connectedHost.equals(host)) {
+						connectedHost.setAddress(host.getAddress());
+						host.setMin(connectedHost.getMin());
+						host.setMax(connectedHost.getMax());
+					}
+					connectedHosts.add(connectedHost);
 				}
-				connectedHosts.add(connectedHost);
+				
+				// if self is not contained in the list
+				if (!connectedHosts.contains(host)) {
+					connectedHosts.clear();
+					host.setMin(0);
+					host.setMax((int) Math.pow(2, 16) - 1);
+					connectedHosts.add(host);
+				}
+				else {
+					backupTuples();
+				}
+		
+				writeHosts();
+				if (oldRange != host.getRange()) {
+					redistributeTuples();
+				}
 			}
-			
-			// if self is not contained in the list
-			if (!connectedHosts.contains(host)) {
-				connectedHosts.clear();
-				host.setMin(0);
-				host.setMax((int) Math.pow(2, 16) - 1);
-				connectedHosts.add(host);
-			}
-	
-			writeHosts();
-			redistributeTuples();
+			hostLock.notifyAll();
 		}
 	}
 
@@ -566,7 +632,7 @@ public class Server {
 			e.printStackTrace();
 		}	
 	}
-
+	
 	/*
 	 * create the tuples file and write the tuples to it
 	 */
@@ -763,6 +829,9 @@ public class Server {
 						break;
 					case STORE_ON_BACKUP:
 						storeOnBackup(new Tuple(LindaInputParser.parseTuple(input)));
+						break;
+					case HOST_ALIVE:
+						clientOut.writeObject(HOST_ALIVE);
 						break;
 					default:
 						String message = "-linda: invalid command";
