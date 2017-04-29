@@ -33,6 +33,7 @@ public class Server {
 	
 	private Host host;
 	private ArrayList<Host> connectedHosts;
+	private ArrayList<Host> pendingHosts;
 	private ArrayList<Tuple> tuples;
 	private ArrayList<Tuple> backupTuples;
 	// tupleLock to prevent race conditions for client handlers
@@ -49,6 +50,7 @@ public class Server {
 	public Server(String name) {
 		this.host = new Host(name);
 		this.connectedHosts = new ArrayList<Host>();
+		this.pendingHosts = new ArrayList<Host>();
 		this.tuples = new ArrayList<Tuple>();
 		this.backupTuples = new ArrayList<Tuple>();
 		
@@ -97,7 +99,7 @@ public class Server {
 						if (o instanceof ArrayList) {
 							@SuppressWarnings("unchecked")
 							ArrayList<String> hosts = (ArrayList<String>) o;
-							updateHosts(hosts);
+							updateHosts(hosts, false);
 						}
 						
 						out.close();
@@ -117,16 +119,13 @@ public class Server {
 		
 		// get tuples
 		synchronized (tuples) {
-			ArrayList<Host> hosts = new ArrayList<Host>(connectedHosts);
-			Collections.sort(hosts, new HostRangeComparator());
-			
 			Host backup = getBackupHost(host);
 			
 			try {
-				int connectedHostPort = backup.getPort();
-				InetAddress connectedHostAddress = backup.getIPAddress();
+				int backupHostPort = backup.getPort();
+				InetAddress backupHostAddress = backup.getIPAddress();
 
-				Socket socket = new Socket(connectedHostAddress, connectedHostPort);
+				Socket socket = new Socket(backupHostAddress, backupHostPort);
 
 				ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
 				ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
@@ -159,71 +158,106 @@ public class Server {
 	 * in the parameter are unique and not already connected
 	 */
 	private void addHosts(Host[] hosts) {
-		synchronized (hostLock) {
-			boolean hostDown = false;
-			while (!hostDown) {
-				for (Host connectedHost : connectedHosts) {
-					try {
-						int connectedHostPort = connectedHost.getPort();
-						InetAddress connectedHostAddress = connectedHost.getIPAddress();
-	
-						Socket socket = new Socket(connectedHostAddress, connectedHostPort);
-						
-						ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
-						ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
-						
-						out.writeObject(HOST_ALIVE);
-						Object o = in.readObject();
-						if (o instanceof String) {
-							@SuppressWarnings("unchecked")
-							String response = (String) o;
-						}
-						
-						in.close();
-						out.close();
-						socket.close();
-	
-					} catch (Exception e) {
-						System.out.println("a host is out");
-						hostDown = true;
-						break;
+		boolean hostDown = false;
+		for (Host connectedHost : connectedHosts) {
+			if (connectedHost.equals(host)) {
+				continue;
+			}
+			
+			try {
+				int connectedHostPort = connectedHost.getPort();
+				InetAddress connectedHostAddress = connectedHost.getIPAddress();
+
+				Socket socket = new Socket(connectedHostAddress, connectedHostPort);
+				
+				ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+				ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
+				
+				out.writeObject(HOST_ALIVE);
+				Object o = in.readObject();
+				if (o instanceof String) {
+					@SuppressWarnings("unchecked")
+					String response = (String) o;
+				}
+				
+				in.close();
+				out.close();
+				socket.close();
+
+			} catch (Exception e) {
+				System.out.println("a host is out");
+				hostDown = true;
+				break;
+			}
+		}
+		
+		boolean hostToAddDown = false;
+		for (Host h : hosts) {
+			try {
+				int hostPort = h.getPort();
+				InetAddress hostAddress = h.getIPAddress();
+
+				Socket socket = new Socket(hostAddress, hostPort);
+				
+				ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+				ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
+				
+				out.writeObject(HOST_ALIVE);
+				Object o = in.readObject();
+				if (o instanceof String) {
+					@SuppressWarnings("unchecked")
+					String response = (String) o;
+				}
+				
+				in.close();
+				out.close();
+				socket.close();
+
+			} catch (Exception e) {
+				System.out.println("a host is out");
+				hostToAddDown = true;
+				break;
+			}
+		}
+		
+		if (hostDown) {
+			for (Host h : hosts) {
+				pendingHosts.add(h);
+			}
+		}
+		else if (hostToAddDown) {
+			
+		}
+		
+		else {
+			boolean addedHost = false;
+			int oldRange = host.getRange();
+			
+			for (int i = 0; i < hosts.length; i++) {
+				if (!hosts[i].equals(host)) {
+					addedHost = true;
+					addHost(hosts[i]);
+				}
+			}
+			
+			if (addedHost) {
+				synchronized (connectedHosts) {
+					writeHosts();
+					if (oldRange != host.getRange()) {
+						redistributeTuples();
 					}
-				}
-				if (hostDown) {
-					try {
-						hostLock.wait();
-					} catch (InterruptedException e) {
-						System.out.println("thread can't wait on the hostLock");
-					}
-					// set the flag once we wake up
-					hostDown = false;
-				}
-				else {
-					break;
+					broadcastObject(buildHostStrings(connectedHosts));
+					backupTuples();
 				}
 			}
 		}
-		
-		boolean addedHost = false;
-		int oldRange = host.getRange();
-		
-		for (int i = 0; i < hosts.length; i++) {
-			if (!hosts[i].equals(host)) {
-				addedHost = true;
-				addHost(hosts[i]);
-			}
-		}
-		
-		if (addedHost) {
-			synchronized (connectedHosts) {
-				writeHosts();
-				if (oldRange != host.getRange()) {
-					redistributeTuples();
-				}
-				broadcastObject(buildHostStrings(connectedHosts));
-				backupTuples();
-			}
-		}
+	}
+	
+	/*
+	 * finishes adding all of the hosts in the hosts to add array list
+	 */
+	private void addPendingHosts() {
+		addHosts(pendingHosts.toArray(new Host[pendingHosts.size()]));
 	}
 
 	private void addHost(Host addedHost) {
@@ -465,41 +499,40 @@ public class Server {
 	/*
 	 * update the host file
 	 */
-	private void updateHosts(ArrayList<String> hosts) {
-		synchronized (hostLock) {
-			synchronized (connectedHosts) {
-				connectedHosts = new ArrayList<Host>();
-				int oldRange = host.getRange();
-		
-				for (int i = 0; i < hosts.size(); i++) {
-					Host connectedHost = Host.readHostWithRange(hosts.get(i));
-					
-					// must change self address in case the incoming host list is from another host
-					if (connectedHost.equals(host)) {
-						connectedHost.setAddress(host.getAddress());
-						host.setMin(connectedHost.getMin());
-						host.setMax(connectedHost.getMax());
-					}
-					connectedHosts.add(connectedHost);
-				}
+	private void updateHosts(ArrayList<String> hosts, boolean backup) {
+		synchronized (connectedHosts) {
+			connectedHosts = new ArrayList<Host>();
+			int oldRange = host.getRange();
+	
+			for (int i = 0; i < hosts.size(); i++) {
+				Host connectedHost = Host.readHostWithRange(hosts.get(i));
 				
-				// if self is not contained in the list
-				if (!connectedHosts.contains(host)) {
-					connectedHosts.clear();
-					host.setMin(0);
-					host.setMax((int) Math.pow(2, 16) - 1);
-					connectedHosts.add(host);
+				// must change self address in case the incoming host list is from another host
+				if (connectedHost.equals(host)) {
+					connectedHost.setAddress(host.getAddress());
+					host.setMin(connectedHost.getMin());
+					host.setMax(connectedHost.getMax());
 				}
-				else {
+				connectedHosts.add(connectedHost);
+			}
+			
+			// if self is not contained in the list
+			if (!connectedHosts.contains(host)) {
+				connectedHosts.clear();
+				host.setMin(0);
+				host.setMax((int) Math.pow(2, 16) - 1);
+				connectedHosts.add(host);
+			}
+			else {
+				if (backup) {
 					backupTuples();
 				}
-		
-				writeHosts();
-				if (oldRange != host.getRange()) {
-					redistributeTuples();
-				}
 			}
-			hostLock.notifyAll();
+	
+			writeHosts();
+			if (oldRange != host.getRange()) {
+				redistributeTuples();
+			}
 		}
 	}
 
@@ -749,7 +782,10 @@ public class Server {
 				}
 				else if (object instanceof ArrayList) {
 					ArrayList<String> hosts = (ArrayList<String>) object;
-					updateHosts(hosts);
+					updateHosts(hosts, true);
+					if (pendingHosts.size() > 0) {
+						addPendingHosts();
+					}
 				}
 
 			} catch (IOException e) {
@@ -769,6 +805,7 @@ public class Server {
 		}
 
 		private void inputHandler(String input) {
+			//System.out.println(input);
 			Matcher matcher = Pattern.compile(
 					"(\\w+)").matcher(input);
 
@@ -873,6 +910,7 @@ public class Server {
 				ArrayList<String> backupTupleStrings = new ArrayList<String>();
 				for (Tuple tuple : backupTuples) {
 					String tupleStr = "(" + tuple.toString() + ")";
+					System.out.println(tupleStr);
 					backupTupleStrings.add(tupleStr);
 				}
 			
